@@ -6,7 +6,13 @@ const admin = require('firebase-admin');
 // ==========================================
 // ១. ភ្ជាប់ទៅកាន់ FIREBASE DATABASE
 // ==========================================
-const serviceAccount = require('./firebase-key.json'); // ទាញយកពី Firebase Console
+const fs = require('fs');
+let serviceAccount;
+if (fs.existsSync('/etc/secrets/firebase-key.json')) {
+  serviceAccount = require('/etc/secrets/firebase-key.json'); // សម្រាប់ពេលដើរលើ Render
+} else {
+  serviceAccount = require('./firebase-key.json'); // សម្រាប់ពេលតេស្តលើកុំព្យូទ័រ
+}
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
