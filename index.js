@@ -1,40 +1,43 @@
 require('dotenv').config();
 const { Telegraf, Markup, session } = require('telegraf');
 const express = require('express');
-const admin = require('firebase-admin');
+const fs = require('fs');
 
 // ==========================================
-// ១. ភ្ជាប់ទៅកាន់ FIREBASE DATABASE
+// ១. ភ្ជាប់ទៅកាន់ FIREBASE ជំនាន់ថ្មី (Modular API)
 // ==========================================
-const fs = require('fs');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
+
 let serviceAccount;
 if (fs.existsSync('/etc/secrets/firebase-key.json')) {
   serviceAccount = require('/etc/secrets/firebase-key.json'); // សម្រាប់ពេលដើរលើ Render
 } else {
   serviceAccount = require('./firebase-key.json'); // សម្រាប់ពេលតេស្តលើកុំព្យូទ័រ
 }
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
+
+initializeApp({
+  credential: cert(serviceAccount)
 });
-const db = admin.firestore();
+
+const db = getFirestore();
 
 // ==========================================
-// ២. បង្កើត BOT និងប្រើប្រាស់ SESSION សម្រាប់កន្ត្រកទំនិញ
+// ២. បង្កើត BOT 
 // ==========================================
 const bot = new Telegraf(process.env.BOT_TOKEN);
-bot.use(session()); // ប្រើសម្រាប់ចងចាំកន្ត្រកទំនិញរបស់អតិថិជនម្នាក់ៗ
+bot.use(session()); 
 
 // ==========================================
-// ៣. ប៊ូតុង MENU គោល (Reply Keyboard)
+// ៣. ប៊ូតុង MENU គោល
 // ==========================================
 const mainMenu = Markup.keyboard([
   ['🛍 មើលទំនិញ', '🛒 កន្ត្រករបស់ខ្ញុំ'],
   ['📞 ទំនាក់ទំនងយើងខ្ញុំ', 'ℹ️ ព័ត៌មានហាង']
 ]).resize();
 
-// ពេលអតិថិជនវាយ /start
 bot.start((ctx) => {
-  ctx.session = { cart: [] }; // បង្កើតកន្ត្រកទទេ
+  ctx.session = { cart: [] }; 
   const userName = ctx.from.first_name;
   ctx.reply(`សួស្តី ${userName}! សូមស្វាគមន៍មកកាន់ហាងយើងខ្ញុំ។ សូមជ្រើសរើសសេវាកម្មខាងក្រោម៖`, mainMenu);
 });
@@ -45,9 +48,8 @@ bot.start((ctx) => {
 bot.hears('🛍 មើលទំនិញ', async (ctx) => {
   ctx.reply('កំពុងស្វែងរកទំនិញ... ⏳');
   try {
-    // សន្មតថាអ្នកមាន Collection 'products' ក្នុង Firebase
     const productsRef = db.collection('products');
-    const snapshot = await productsRef.limit(5).get(); // ទាញយក 5 ផលិតផលសិន
+    const snapshot = await productsRef.limit(5).get(); 
     
     if (snapshot.empty) {
       return ctx.reply('សុំទោស! មិនមានទំនិញនៅពេលនេះទេ។', mainMenu);
@@ -55,7 +57,6 @@ bot.hears('🛍 មើលទំនិញ', async (ctx) => {
 
     snapshot.forEach(doc => {
       const p = doc.data();
-      // បង្ហាញរូបភាព និងប៊ូតុង "បន្ថែមចូលកន្ត្រក"
       ctx.replyWithPhoto(p.imageUrl || 'https://via.placeholder.com/150', {
         caption: `📦 **${p.name}**\n💵 តម្លៃ: $${p.price}\n📝 ព័ត៌មាន: ${p.description}`,
         parse_mode: 'Markdown',
@@ -74,16 +75,14 @@ bot.hears('🛍 មើលទំនិញ', async (ctx) => {
 // ៥. មុខងារបន្ថែមចូលកន្ត្រក (Add to Cart)
 // ==========================================
 bot.action(/addcart_(.+)/, (ctx) => {
-  const data = ctx.match[1].split('_'); // បំបែក ID, Name, Price
+  const data = ctx.match[1].split('_'); 
   const productId = data[0];
   const productName = data[1];
   const productPrice = parseFloat(data[2]);
 
-  // បើកន្ត្រកមិនទាន់មាន បង្កើតវា
   if (!ctx.session) ctx.session = { cart: [] };
   if (!ctx.session.cart) ctx.session.cart = [];
 
-  // ដាក់ទំនិញចូលកន្ត្រក
   ctx.session.cart.push({ id: productId, name: productName, price: productPrice });
   
   ctx.answerCbQuery(`✅ បានបន្ថែម ${productName} ចូលកន្ត្រក!`);
@@ -91,7 +90,7 @@ bot.action(/addcart_(.+)/, (ctx) => {
 });
 
 // ==========================================
-// ៦. មុខងារពិនិត្យកន្ត្រក និង គិតលុយ (Checkout Flow)
+// ៦. មុខងារពិនិត្យកន្ត្រក និង គិតលុយ 
 // ==========================================
 bot.hears('🛒 កន្ត្រករបស់ខ្ញុំ', (ctx) => {
   const cart = ctx.session?.cart || [];
@@ -102,7 +101,7 @@ bot.hears('🛒 កន្ត្រករបស់ខ្ញុំ', (ctx) => {
   let total = 0;
   let receipt = '📝 **វិក្កយបត្របណ្តោះអាសន្ន៖**\n\n';
   cart.forEach((item, index) => {
-    receipt += `${index + 1}. ${item.name} -$${item.price}\n`;
+    receipt += `${index + 1}. ${item.name} - $${item.price}\n`;
     total += item.price;
   });
   receipt += `\n💵 **សរុប: $${total}**`;
@@ -116,14 +115,12 @@ bot.hears('🛒 កន្ត្រករបស់ខ្ញុំ', (ctx) => {
   });
 });
 
-// លុបកន្ត្រកចោល
 bot.action('clear_cart', (ctx) => {
   ctx.session.cart = [];
   ctx.answerCbQuery('🗑 បានលុបកន្ត្រកដោយជោគជ័យ!');
   ctx.editMessageText('កន្ត្រករបស់អ្នកត្រូវបានលុប។');
 });
 
-// ចុចប៊ូតុងបញ្ជាទិញ -> ទាមទារលេខទូរស័ព្ទ
 bot.action('checkout', (ctx) => {
   ctx.answerCbQuery('កំពុងរៀបចំការបញ្ជាទិញ...');
   ctx.reply('ដើម្បីបញ្ចប់ការបញ្ជាទិញ សូមចុចប៊ូតុងខាងក្រោមដើម្បីផ្ញើលេខទូរស័ព្ទរបស់អ្នកមកកាន់យើងខ្ញុំ៖', 
@@ -133,7 +130,6 @@ bot.action('checkout', (ctx) => {
   );
 });
 
-// ទទួលបានលេខទូរស័ព្ទ -> បញ្ចប់ការទិញ & លោតសារទៅ Admin
 bot.on('contact', async (ctx) => {
   const cart = ctx.session?.cart || [];
   if (cart.length === 0) return ctx.reply('មិនមានទំនិញក្នុងកន្ត្រកទេ។', mainMenu);
@@ -141,12 +137,10 @@ bot.on('contact', async (ctx) => {
   const phone = ctx.message.contact.phone_number;
   const user = ctx.from;
   
-  // គណនាតម្លៃសរុបម្តងទៀត
   let total = 0;
   cart.forEach(item => total += item.price);
 
   try {
-    // ក. រក្សាទុកការបញ្ជាទិញចូល Firebase
     const orderRef = await db.collection('orders').add({
       userId: user.id,
       customerName: user.first_name,
@@ -154,16 +148,12 @@ bot.on('contact', async (ctx) => {
       items: cart,
       totalAmount: total,
       status: 'pending',
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt: FieldValue.serverTimestamp() // ប្រើប្រាស់ FieldValue តាមទម្រង់ថ្មី
     });
 
-    // ខ. លុបទំនិញពីកន្ត្រកវិញ
     ctx.session.cart = [];
-
-    // គ. ផ្ញើសារអរគុណដល់អតិថិជន
     ctx.reply(`✅ ការបញ្ជាទិញទទួលបានជោគជ័យ! \n\nលេខកូដវិក្កយបត្រ៖ #${orderRef.id}\nក្រុមការងារនឹងទាក់ទងទៅលេខ ${phone} ក្នុងពេលឆាប់ៗនេះ។`, mainMenu);
 
-    // ឃ. លោតសារទៅប្រាប់ Admin ភ្លាមៗ (Notification)
     const adminMsg = `🚨 **មានការបញ្ជាទិញថ្មី!**\n\n👤 អតិថិជន: ${user.first_name}\n📱 លេខទូរស័ព្ទ: ${phone}\n💰 ទឹកប្រាក់សរុប: $${total}\n🆔 លេខវិក្កយបត្រ: ${orderRef.id}`;
     bot.telegram.sendMessage(process.env.ADMIN_ID, adminMsg, { parse_mode: 'Markdown' });
 
@@ -179,7 +169,6 @@ bot.on('contact', async (ctx) => {
 const app = express();
 app.use(express.json());
 
-// បើមាន URL ពី Render យើងប្រើ Webhook, បើអត់ យើងប្រើ Polling (សម្រាប់សាកល្បងលើកុំព្យូទ័រ)
 if (process.env.RENDER_EXTERNAL_URL) {
   app.use(bot.webhookCallback('/telegram-webhook'));
   bot.telegram.setWebhook(`${process.env.RENDER_EXTERNAL_URL}/telegram-webhook`);
@@ -189,7 +178,6 @@ if (process.env.RENDER_EXTERNAL_URL) {
   console.log('Bot is running on Local Polling...');
 }
 
-// ផ្លូវ (Route) សម្រាប់ឱ្យ Render ស្គាល់ថា Server កំពុងដើរ
 app.get('/', (req, res) => res.send('E-commerce Bot Server is Running!'));
 
 const PORT = process.env.PORT || 3000;
@@ -197,6 +185,5 @@ app.listen(PORT, () => {
   console.log(`Server is listening on port ${PORT}`);
 });
 
-// អនុញ្ញាតឱ្យបិទ Bot ដោយសុវត្ថិភាពពេលឈប់
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
