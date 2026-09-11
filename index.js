@@ -43,7 +43,7 @@ bot.start((ctx) => {
 });
 
 // ==========================================
-// ៤. មុខងារបង្ហាញទំនិញពី FIREBASE
+// ៤. មុខងារបង្ហាញទំនិញពី FIREBASE (កែប្រែថ្មីមានសុវត្ថិភាព)
 // ==========================================
 bot.hears('🛍 មើលទំនិញ', async (ctx) => {
   ctx.reply('កំពុងស្វែងរកទំនិញ... ⏳');
@@ -57,17 +57,31 @@ bot.hears('🛍 មើលទំនិញ', async (ctx) => {
 
     snapshot.forEach(doc => {
       const p = doc.data();
-      ctx.replyWithPhoto(p.imageUrl || 'https://via.placeholder.com/150', {
+      const imageUrl = p.imageUrl && p.imageUrl.startsWith('http') 
+        ? p.imageUrl 
+        : 'https://i.imgur.com/33EFdDI.jpg'; // ប្រើប្រាស់รูပภาพสำรองដែលមានសុវត្ថិភាព
+
+      // ផ្ញើជារូបភាព ព្រមទាំងប៊ូតុងទិញ
+      ctx.replyWithPhoto(imageUrl, {
         caption: `📦 **${p.name}**\n💵 តម្លៃ: $${p.price}\n📝 ព័ត៌មាន: ${p.description}`,
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
           Markup.button.callback(`🛒 ទិញ ($${p.price})`, `addcart_${doc.id}_${p.name}_${p.price}`)
         ])
+      }).catch(err => {
+        // បើករណីផ្ញើរូបភាពមិនចេញ វានឹងផ្ញើជាអក្សរជំនួសវិញ ដើម្បីកុំឱ្យ Bot គាំង
+        console.error("Image send error:", err.message);
+        ctx.reply(`📦 **${p.name}**\n💵 តម្លៃ: $${p.price}\n📝 ${p.description}`, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            Markup.button.callback(`🛒 ទិញ ($${p.price})`, `addcart_${doc.id}_${p.name}_${p.price}`)
+          ])
+        });
       });
     });
   } catch (error) {
     console.error(error);
-    ctx.reply('មានបញ្ហាក្នុងការភ្ជាប់ទៅកាន់ប្រព័ន្ធទិន្នន័យ។');
+    ctx.reply('មានបញ្ហាក្នុងการភ្ជាប់ទៅកាន់ប្រព័ន្ធទិន្នន័យ។');
   }
 });
 
@@ -185,5 +199,10 @@ app.listen(PORT, () => {
   console.log(`Server is listening on port ${PORT}`);
 });
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+// កូដការពារកុំឱ្យ Bot គាំងពេល Render បិទបើក Server
+process.once('SIGINT', () => {
+  try { bot.stop('SIGINT'); } catch (e) {}
+});
+process.once('SIGTERM', () => {
+  try { bot.stop('SIGTERM'); } catch (e) {}
+});
