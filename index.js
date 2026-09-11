@@ -1,208 +1,305 @@
-require('dotenv').config();
-const { Telegraf, Markup, session } = require('telegraf');
-const express = require('express');
-const fs = require('fs');
+import { Telegraf, Markup } from 'telegraf';
+import 'dotenv/config';
+import { db } from './firebase.js';
+import { collection, getDocs, query, where, addDoc, deleteDoc, doc, limit, serverTimestamp } from 'firebase/firestore';
 
-// ==========================================
-// ១. ភ្ជាប់ទៅកាន់ FIREBASE ជំនាន់ថ្មី (Modular API)
-// ==========================================
-const { initializeApp, cert } = require('firebase-admin/app');
-const { getFirestore, FieldValue } = require('firebase-admin/firestore');
-
-let serviceAccount;
-if (fs.existsSync('/etc/secrets/firebase-key.json')) {
-  serviceAccount = require('/etc/secrets/firebase-key.json'); // សម្រាប់ពេលដើរលើ Render
-} else {
-  serviceAccount = require('./firebase-key.json'); // សម្រាប់ពេលតេស្តលើកុំព្យូទ័រ
-}
-
-initializeApp({
-  credential: cert(serviceAccount)
-});
-
-const db = getFirestore();
-
-// ==========================================
-// ២. បង្កើត BOT 
-// ==========================================
 const bot = new Telegraf(process.env.BOT_TOKEN);
-bot.use(session()); 
 
 // ==========================================
-// ៣. ប៊ូតុង MENU គោល
+// ១. ប្រព័ន្ធចងចាំជំហានបញ្ជាទិញ (Checkout State)
 // ==========================================
+const checkoutState = new Map(); 
+
+// ម៉ឺនុយគោលខាងក្រោម
 const mainMenu = Markup.keyboard([
   ['🛍 មើលទំនិញ', '🛒 កន្ត្រករបស់ខ្ញុំ'],
   ['📞 ទំនាក់ទំនងយើងខ្ញុំ', 'ℹ️ ព័ត៌មានហាង']
 ]).resize();
 
+// ==========================================
+// ២. មុខងារបញ្ជាទូទៅ (Commands)
+// ==========================================
 bot.start((ctx) => {
-  ctx.session = { cart: [] }; 
-  const userName = ctx.from.first_name;
-  ctx.reply(`សួស្តី ${userName}! សូមស្វាគមន៍មកកាន់ហាងយើងខ្ញុំ។ សូមជ្រើសរើសសេវាកម្មខាងក្រោម៖`, mainMenu);
+  checkoutState.delete(ctx.from.id); // លុបការចងចាំចាស់ៗចោលពេលចុច Start
+  ctx.reply(`សួស្តីបង ${ctx.from.first_name}! 👋\nសូមស្វាគមន៍មកកាន់ហាងយើងខ្ញុំ។ តើមានអ្វីឱ្យយើងខ្ញុំជួយបងដែរ?`, mainMenu);
 });
 
+bot.hears('📞 ទំនាក់ទំនងយើងខ្ញុំ', (ctx) => ctx.reply('សូមទាក់ទងមកកាន់យើងខ្ញុំតាមរយៈលេខ៖ 012 345 678 ឬ Telegram @admin'));
+bot.hears('ℹ️ ព័ត៌មានហាង', (ctx) => ctx.reply('ហាងយើងខ្ញុំមានលក់ទំនិញគ្រប់ប្រភេទ ធានាគុណភាព តម្លៃសមរម្យ និងសេវាកម្មរហ័សទាន់ចិត្ត។'));
+
 // ==========================================
-// ៤. មុខងារបង្ហាញទំនិញពី FIREBASE (កែប្រែថ្មីមានសុវត្ថិភាព)
+// ៣. មុខងារទាញយកទំនិញពី Firebase
 // ==========================================
 bot.hears('🛍 មើលទំនិញ', async (ctx) => {
-  ctx.reply('កំពុងស្វែងរកទំនិញ... ⏳');
+  checkoutState.delete(ctx.from.id);
+  const msg = await ctx.reply('កំពុងស្វែងរកទំនិញ... ⏳');
+  
   try {
-    const productsRef = db.collection('products');
-    const snapshot = await productsRef.limit(5).get(); 
-    
-    if (snapshot.empty) {
-      return ctx.reply('សុំទោស! មិនមានទំនិញនៅពេលនេះទេ។', mainMenu);
-    }
+    const snapshot = await getDocs(query(collection(db, 'products'), limit(5)));
+    if (snapshot.empty) return ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, 'សុំទោស! មិនមានទំនិញនៅពេលនេះទេ។');
 
-    snapshot.forEach(doc => {
-      const p = doc.data();
-      const imageUrl = p.imageUrl && p.imageUrl.startsWith('http') 
-        ? p.imageUrl 
-        : 'https://i.imgur.com/33EFdDI.jpg'; // ប្រើប្រាស់รูပภาพสำรองដែលមានសុវត្ថិភាព
+    await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id);
 
-      // ផ្ញើជារូបភាព ព្រមទាំងប៊ូតុងទិញ
+    snapshot.forEach(docSnap => {
+      const p = docSnap.data();
+      const imageUrl = p.imageUrl && p.imageUrl.startsWith('http') ? p.imageUrl : 'https://i.imgur.com/33EFdDI.jpg';
+
       ctx.replyWithPhoto(imageUrl, {
-        caption: `📦 **${p.name}**\n💵 តម្លៃ: $${p.price}\n📝 ព័ត៌មាន: ${p.description}`,
+        caption: `📦 **${p.name}**\n💵 តម្លៃ: $${p.price}\n📝 ព័ត៌មាន: ${p.description || ''}`,
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          Markup.button.callback(`🛒 ទិញ ($${p.price})`, `addcart_${doc.id}_${p.name}_${p.price}`)
+          Markup.button.callback(`🛒 បន្ថែមចូលកន្ត្រក ($${p.price})`, `addcart_${docSnap.id}_${p.name}_${p.price}`)
         ])
       }).catch(err => {
-        // បើករណីផ្ញើរូបភាពមិនចេញ វានឹងផ្ញើជាអក្សរជំនួសវិញ ដើម្បីកុំឱ្យ Bot គាំង
-        console.error("Image send error:", err.message);
-        ctx.reply(`📦 **${p.name}**\n💵 តម្លៃ: $${p.price}\n📝 ${p.description}`, {
+        ctx.reply(`📦 **${p.name}**\n💵 តម្លៃ: $${p.price}\n📝 ${p.description || ''}`, {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            Markup.button.callback(`🛒 ទិញ ($${p.price})`, `addcart_${doc.id}_${p.name}_${p.price}`)
-          ])
+          ...Markup.inlineKeyboard([ Markup.button.callback(`🛒 ទិញ ($${p.price})`, `addcart_${docSnap.id}_${p.name}_${p.price}`) ])
         });
       });
     });
   } catch (error) {
     console.error(error);
-    ctx.reply('មានបញ្ហាក្នុងการភ្ជាប់ទៅកាន់ប្រព័ន្ធទិន្នន័យ។');
+    ctx.reply('មានបញ្ហាក្នុងការភ្ជាប់ទៅកាន់ប្រព័ន្ធទិន្នន័យ។');
   }
 });
 
 // ==========================================
-// ៥. មុខងារបន្ថែមចូលកន្ត្រក (Add to Cart)
+// ៤. មុខងារកន្ត្រក និង បញ្ជាទិញ (Cart & Checkout)
 // ==========================================
-bot.action(/addcart_(.+)/, (ctx) => {
+
+// បន្ថែមចូលកន្ត្រក
+bot.action(/addcart_(.+)/, async (ctx) => {
   const data = ctx.match[1].split('_'); 
-  const productId = data[0];
-  const productName = data[1];
-  const productPrice = parseFloat(data[2]);
-
-  if (!ctx.session) ctx.session = { cart: [] };
-  if (!ctx.session.cart) ctx.session.cart = [];
-
-  ctx.session.cart.push({ id: productId, name: productName, price: productPrice });
-  
-  ctx.answerCbQuery(`✅ បានបន្ថែម ${productName} ចូលកន្ត្រក!`);
-  ctx.reply(`✅ អ្នកបានបន្ថែម **${productName}** (តម្លៃ $${productPrice}) ចូលកន្ត្រក។ ចុច "🛒 កន្ត្រករបស់ខ្ញុំ" ដើម្បីគិតលុយ។`, { parse_mode: 'Markdown' });
-});
-
-// ==========================================
-// ៦. មុខងារពិនិត្យកន្ត្រក និង គិតលុយ 
-// ==========================================
-bot.hears('🛒 កន្ត្រករបស់ខ្ញុំ', (ctx) => {
-  const cart = ctx.session?.cart || [];
-  if (cart.length === 0) {
-    return ctx.reply('កន្ត្រករបស់អ្នកទទេស្អាត។ សូមជ្រើសរើសទំនិញសិន! 🛍');
-  }
-
-  let total = 0;
-  let receipt = '📝 **វិក្កយបត្របណ្តោះអាសន្ន៖**\n\n';
-  cart.forEach((item, index) => {
-    receipt += `${index + 1}. ${item.name} - $${item.price}\n`;
-    total += item.price;
-  });
-  receipt += `\n💵 **សរុប: $${total}**`;
-
-  ctx.reply(receipt, {
-    parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([
-      [Markup.button.callback('✅ យល់ព្រមបញ្ជាទិញ (Checkout)', 'checkout')],
-      [Markup.button.callback('🗑 លុបចោលទាំងអស់', 'clear_cart')]
-    ])
-  });
-});
-
-bot.action('clear_cart', (ctx) => {
-  ctx.session.cart = [];
-  ctx.answerCbQuery('🗑 បានលុបកន្ត្រកដោយជោគជ័យ!');
-  ctx.editMessageText('កន្ត្រករបស់អ្នកត្រូវបានលុប។');
-});
-
-bot.action('checkout', (ctx) => {
-  ctx.answerCbQuery('កំពុងរៀបចំការបញ្ជាទិញ...');
-  ctx.reply('ដើម្បីបញ្ចប់ការបញ្ជាទិញ សូមចុចប៊ូតុងខាងក្រោមដើម្បីផ្ញើលេខទូរស័ព្ទរបស់អ្នកមកកាន់យើងខ្ញុំ៖', 
-    Markup.keyboard([
-      [Markup.button.contactRequest('📱 ផ្ញើលេខទូរស័ព្ទរបស់ខ្ញុំ')]
-    ]).oneTime().resize()
-  );
-});
-
-bot.on('contact', async (ctx) => {
-  const cart = ctx.session?.cart || [];
-  if (cart.length === 0) return ctx.reply('មិនមានទំនិញក្នុងកន្ត្រកទេ។', mainMenu);
-
-  const phone = ctx.message.contact.phone_number;
-  const user = ctx.from;
-  
-  let total = 0;
-  cart.forEach(item => total += item.price);
+  const id = data[0], name = data[1], price = parseFloat(data[2]);
 
   try {
-    const orderRef = await db.collection('orders').add({
-      userId: user.id,
-      customerName: user.first_name,
-      phone: phone,
-      items: cart,
-      totalAmount: total,
-      status: 'pending',
-      createdAt: FieldValue.serverTimestamp() // ប្រើប្រាស់ FieldValue តាមទម្រង់ថ្មី
+    await addDoc(collection(db, 'carts'), {
+      userId: ctx.from.id,
+      productId: id,
+      productName: name,
+      price: price,
+      addedAt: serverTimestamp()
     });
-
-    ctx.session.cart = [];
-    ctx.reply(`✅ ការបញ្ជាទិញទទួលបានជោគជ័យ! \n\nលេខកូដវិក្កយបត្រ៖ #${orderRef.id}\nក្រុមការងារនឹងទាក់ទងទៅលេខ ${phone} ក្នុងពេលឆាប់ៗនេះ។`, mainMenu);
-
-    const adminMsg = `🚨 **មានការបញ្ជាទិញថ្មី!**\n\n👤 អតិថិជន: ${user.first_name}\n📱 លេខទូរស័ព្ទ: ${phone}\n💰 ទឹកប្រាក់សរុប: $${total}\n🆔 លេខវិក្កយបត្រ: ${orderRef.id}`;
-    bot.telegram.sendMessage(process.env.ADMIN_ID, adminMsg, { parse_mode: 'Markdown' });
-
+    await ctx.answerCbQuery(`✅ បានបន្ថែម ${name} ចូលកន្ត្រក!`);
   } catch (error) {
-    console.error(error);
-    ctx.reply('សុំទោស មានបញ្ហាបច្ចេកទេស។ សូមព្យាយាមម្តងទៀត។', mainMenu);
+    await ctx.answerCbQuery('❌ មានបញ្ហា មិនអាចបន្ថែមបានទេ');
+  }
+});
+
+// មើលកន្ត្រក
+bot.hears('🛒 កន្ត្រករបស់ខ្ញុំ', async (ctx) => {
+  checkoutState.delete(ctx.from.id);
+  try {
+    const q = query(collection(db, 'carts'), where('userId', '==', ctx.from.id));
+    const snap = await getDocs(q);
+
+    if (snap.empty) return ctx.reply('🛒 កន្ត្រករបស់អ្នកទទេស្អាត។ សូមជ្រើសរើសទំនិញសិន!', mainMenu);
+
+    let msg = '📝 **វិក្កយបត្របណ្ដោះអាសន្នរបស់អ្នក៖**\n\n';
+    let total = 0, count = 1;
+
+    snap.forEach(doc => {
+      const item = doc.data();
+      msg += `${count}. ${item.productName} - $${item.price}\n`;
+      total += item.price;
+      count++;
+    });
+    msg += `\n💵 **សរុប:** $${total.toFixed(2)}`;
+
+    await ctx.reply(msg, {
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "✅ យល់ព្រមបញ្ជាទិញ (Checkout)", callback_data: "checkout" }],
+          [{ text: "🗑 លុបចោលទាំងអស់", callback_data: "clearcart" }]
+        ]
+      }
+    });
+  } catch (error) {
+    ctx.reply('មានបញ្ហាក្នុងការទាញយកទិន្នន័យ។');
+  }
+});
+
+// លុបកន្ត្រក
+bot.action('clearcart', async (ctx) => {
+  try {
+    const q = query(collection(db, 'carts'), where('userId', '==', ctx.from.id));
+    const snap = await getDocs(q);
+    const batch = [];
+    snap.forEach(d => batch.push(deleteDoc(doc(db, 'carts', d.id))));
+    await Promise.all(batch);
+
+    await ctx.editMessageText('🗑 កន្ត្រករបស់អ្នកត្រូវបានលុបចោលរួចរាល់។');
+    await ctx.answerCbQuery('បានលុបជោគជ័យ');
+  } catch (error) {
+    await ctx.answerCbQuery('មានបញ្ហាពេលលុប');
   }
 });
 
 // ==========================================
-// ៧. ចាប់ផ្តើម EXPRESS SERVER សម្រាប់ RENDER
+// ៥. ដំណើរការ Checkout មួយជំហានម្តងៗ (Step-by-Step)
 // ==========================================
-const app = express();
-app.use(express.json());
 
+// ជំហានទី ១៖ សួរលេខទូរស័ព្ទ
+bot.action('checkout', async (ctx) => {
+  checkoutState.set(ctx.from.id, { step: 'WAITING_PHONE' });
+  await ctx.deleteMessage(); // លុបសារចាស់ចោលកុំឱ្យស្អេកស្កះ
+  await ctx.reply('ដើម្បីបន្តការបញ្ជាទិញ សូមចុចប៊ូតុងខាងក្រោម ដើម្បីផ្ញើលេខទូរស័ព្ទរបស់អ្នកមកកាន់យើងខ្ញុំ៖ 👇', {
+    reply_markup: {
+      keyboard: [ [{ text: "📱 ចុចទីនេះដើម្បីផ្ញើលេខទូរស័ព្ទ", request_contact: true }] ],
+      resize_keyboard: true,
+      one_time_keyboard: true
+    }
+  });
+});
+
+// ជំហានទី ២៖ ទទួលលេខទូរស័ព្ទ រួចសួរទីតាំង (ភ្នំពេញ ឬ ខេត្ត)
+bot.on('contact', async (ctx) => {
+  const state = checkoutState.get(ctx.from.id);
+  if (state && state.step === 'WAITING_PHONE') {
+    state.phone = ctx.message.contact.phone_number;
+    state.step = 'WAITING_REGION';
+    checkoutState.set(ctx.from.id, state);
+
+    await ctx.reply('✅ ទទួលបានលេខទូរស័ព្ទជោគជ័យ!', { reply_markup: { remove_keyboard: true } });
+    await ctx.reply('📍 តើអ្នកចង់ឱ្យដឹកជញ្ជូនទៅកាន់ទីតាំងណា?', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🏙 ភ្នំពេញ", callback_data: "loc_PhnomPenh" }, { text: "🛣 តាមបណ្តាខេត្ត", callback_data: "loc_Province" }]
+        ]
+      }
+    });
+  }
+});
+
+// ជំហានទី ៣៖ ទទួលយកទីតាំង រួចទាមទារអាសយដ្ឋានលម្អិត
+bot.action(/loc_(.+)/, async (ctx) => {
+  const state = checkoutState.get(ctx.from.id);
+  if (!state) return;
+
+  state.region = ctx.match[1] === 'PhnomPenh' ? 'ភ្នំពេញ' : 'តាមខេត្ត';
+  state.step = 'WAITING_ADDRESS';
+  checkoutState.set(ctx.from.id, state);
+
+  await ctx.editMessageText(`✅ អ្នកបានជ្រើសរើស៖ **${state.region}**`, { parse_mode: 'Markdown' });
+  await ctx.reply('✍️ សូមវាយបញ្ចូលអាសយដ្ឋានលម្អិតរបស់អ្នក (ឧ. ផ្ទះលេខ.. ផ្លូវ.. សង្កាត់.. ខណ្ឌ.. ឬ ស្រុក/ខេត្ត) រួចចុចបញ្ជូន៖', Markup.forceReply());
+  await ctx.answerCbQuery();
+});
+
+// ជំហានទី ៤៖ ចាប់យកអត្ថបទអាសយដ្ឋាន រួចសួរក្រុមហ៊ុនដឹកជញ្ជូន
+bot.on('text', async (ctx, next) => {
+  const text = ctx.message.text;
+  const state = checkoutState.get(ctx.from.id);
+
+  // ប្រសិនបើគាត់ចុចម៉ឺនុយគោល យើងលុប State គាត់ចោល (រំសាយការ Checkout)
+  const menuButtons = ['🛍 មើលទំនិញ', '🛒 កន្ត្រករបស់ខ្ញុំ', '📞 ទំនាក់ទំនងយើងខ្ញុំ', 'ℹ️ ព័ត៌មានហាង'];
+  if (menuButtons.includes(text)) {
+    checkoutState.delete(ctx.from.id);
+    return next(); 
+  }
+
+  // ប្រសិនបើគាត់កំពុងស្ថិតក្នុងជំហានបញ្ជូលអាសយដ្ឋាន
+  if (state && state.step === 'WAITING_ADDRESS') {
+    state.address = text;
+    state.step = 'WAITING_DELIVERY';
+    checkoutState.set(ctx.from.id, state);
+
+    await ctx.reply('🚚 សូមជ្រើសរើសក្រុមហ៊ុនដឹកជញ្ជូនដែលអ្នកពេញចិត្តខាងក្រោម៖', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🔴 J&T Express", callback_data: "dev_J&T Express" }, { text: "🔵 វីរៈប៊ុនថាំ (VET)", callback_data: "dev_វីរៈប៊ុនថាំ" }],
+          [{ text: "🟢 កាពីតូល (Capitol)", callback_data: "dev_កាពីតូល" }, { text: "🟡 ក្រុមហ៊ុនផ្សេងៗ", callback_data: "dev_ក្រុមហ៊ុនផ្សេងៗ" }]
+        ]
+      }
+    });
+    return;
+  }
+  return next();
+});
+
+// ជំហានទី ៥ (ចុងក្រោយ)៖ បញ្ជាក់ការកុម្ម៉ង់ រក្សាទុកក្នុង Database និងលុបកន្ត្រក
+bot.action(/dev_(.+)/, async (ctx) => {
+  const state = checkoutState.get(ctx.from.id);
+  if (!state) return;
+
+  state.delivery = ctx.match[1];
+  await ctx.editMessageText(`✅ អ្នកបានជ្រើសរើស៖ **${state.delivery}**`, { parse_mode: 'Markdown' });
+  const msg = await ctx.reply('⏳ កំពុងដំណើរការការបញ្ជាទិញរបស់អ្នក សូមរង់ចាំបន្តិច...');
+
+  try {
+    const q = query(collection(db, 'carts'), where('userId', '==', ctx.from.id));
+    const cartSnap = await getDocs(q);
+
+    if (cartSnap.empty) return ctx.reply('កន្ត្រករបស់អ្នកទទេស្អាត។', mainMenu);
+
+    let totalAmount = 0;
+    let itemsList = '';
+    const items = [];
+
+    cartSnap.forEach(docSnap => {
+      const data = docSnap.data();
+      totalAmount += data.price;
+      itemsList += `- ${data.productName} ($${data.price})\n`;
+      items.push(data);
+    });
+
+    // រក្សាទុកក្នុង Firestore 
+    await addDoc(collection(db, 'orders'), {
+      userId: ctx.from.id,
+      username: ctx.from.username || ctx.from.first_name,
+      phone: state.phone,
+      region: state.region,
+      address: state.address,
+      delivery: state.delivery,
+      items: items,
+      totalAmount: totalAmount,
+      status: 'pending', // សម្រាប់ឱ្យ Admin មើល
+      createdAt: serverTimestamp()
+    });
+
+    // លុបទំនិញពីកន្ត្រកវិញបន្ទាប់ពីទិញរួច
+    const batchDelete = [];
+    cartSnap.forEach(d => batchDelete.push(deleteDoc(doc(db, 'carts', d.id))));
+    await Promise.all(batchDelete);
+
+    // បង្ហាញវិក្កយបត្រផ្លូវការទៅអតិថិជន
+    const receipt = `🎉 **ការបញ្ជាទិញទទួលបានជោគជ័យ!**\n\n` +
+                    `📦 **ទំនិញដែលបានកុម្ម៉ង់៖**\n${itemsList}` +
+                    `\n💵 **សរុបប្រាក់ត្រូវទូទាត់:** $${totalAmount.toFixed(2)}\n\n` +
+                    `📍 **ព័ត៌មានដឹកជញ្ជូន៖**\n` +
+                    `• លេខទូរស័ព្ទ: ${state.phone}\n` +
+                    `• តំបន់: ${state.region}\n` +
+                    `• អាសយដ្ឋាន: ${state.address}\n` +
+                    `• ក្រុមហ៊ុនដឹក: ${state.delivery}\n\n` +
+                    `ក្រុមការងារយើងខ្ញុំនឹងរៀបចំឥវ៉ាន់ និងទាក់ទងទៅអ្នកក្នុងពេលឆាប់ៗនេះ។ សូមអរគុណ! 🙏`;
+
+    await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id);
+    await ctx.reply(receipt, { parse_mode: 'Markdown', ...mainMenu });
+
+    // លុបការចងចាំចោល ដើម្បីអតិថិជនអាចទិញលើកក្រោយទៀតបាន
+    checkoutState.delete(ctx.from.id);
+
+  } catch (error) {
+    console.error("Order error:", error);
+    ctx.reply('មានបញ្ហាក្នុងការបញ្ជាទិញ។ សូមសាកល្បងម្ដងទៀត។', mainMenu);
+  }
+  await ctx.answerCbQuery();
+});
+
+// ==========================================
+// ៦. បង្កើត Webhook សម្រាប់ Render 
+// ==========================================
 if (process.env.RENDER_EXTERNAL_URL) {
-  app.use(bot.webhookCallback('/telegram-webhook'));
-  bot.telegram.setWebhook(`${process.env.RENDER_EXTERNAL_URL}/telegram-webhook`);
-  console.log('Webhook is set!');
+  bot.launch({
+    webhook: {
+      domain: process.env.RENDER_EXTERNAL_URL,
+      port: process.env.PORT || 10000
+    }
+  }).then(() => console.log('Webhook is set!\nServer is listening...'));
 } else {
-  bot.launch();
-  console.log('Bot is running on Local Polling...');
+  bot.launch().then(() => console.log('Bot is running in Long Polling mode!'));
 }
 
-app.get('/', (req, res) => res.send('E-commerce Bot Server is Running!'));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server is listening on port ${PORT}`);
-});
-
 // កូដការពារកុំឱ្យ Bot គាំងពេល Render បិទបើក Server
-process.once('SIGINT', () => {
-  try { bot.stop('SIGINT'); } catch (e) {}
-});
-process.once('SIGTERM', () => {
-  try { bot.stop('SIGTERM'); } catch (e) {}
-});
+process.once('SIGINT', () => { try { bot.stop('SIGINT'); } catch(e){} });
+process.once('SIGTERM', () => { try { bot.stop('SIGTERM'); } catch(e){} });
